@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Young's Double-Slit Experiment — XR Physics Laboratory</title>
+    <meta name="description" content="Interactive 3D & WebXR Young's Double-Slit Experiment Simulation supporting Meta Quest 3/3S, Desktop, and Web Browser.">
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Three.js ES Modules Import Map -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "./node_modules/three/build/three.module.js",
+            "three/addons/": "./node_modules/three/examples/jsm/"
+        }
+    }
+    </script>
+    
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+    <!-- 3D Canvas Mount Point -->
+    <div id="canvas-container"></div>
+
+    <!-- 1. Global Navigation Bar -->
+    <nav class="top-navbar glass-panel">
+        <div class="nav-brand">
+            <div class="brand-badge">
+                <span class="pulse-dot"></span>
+                <span>YDSE XR</span>
+            </div>
+            <span class="brand-title">Young's Double-Slit Virtual Laboratory</span>
+        </div>
+
+        <div class="nav-center">
+            <button id="tab-classical" class="mode-tab-btn active">Wave Interference</button>
+            <button id="tab-quantum" class="mode-tab-btn">Quantum Single-Photon</button>
+            <button id="tab-lesson" class="mode-tab-btn">9-Min Guided Lesson</button>
+        </div>
+
+        <div class="nav-actions">
+            <!-- WebXR VR Mount -->
+            <div id="vr-btn-container"></div>
+            <button id="btn-audio" class="btn-icon" title="Toggle Lab Ambient Audio">🔊</button>
+            <button id="btn-help" class="btn-icon" title="Help & Keyboard Controls (H)">❓</button>
+            <button id="btn-reset" class="btn-icon" title="Reset Experiment (R)">🔄</button>
+        </div>
+    </nav>
+
+    <!-- 2. Left Sidebar: Interactive Experiment Controls -->
+    <aside class="left-controls-panel glass-panel">
+        <div class="panel-header">
+            <span class="panel-title">🔬 Apparatus Parameters</span>
+            <span id="laser-indicator" class="pulse-dot" style="background:#ef4444;box-shadow:0 0 8px #ef4444;"></span>
+        </div>
+
+        <div class="scroll-content">
+            <!-- Laser Power Switch -->
+            <button id="btn-laser-power" class="btn-power on">
+                <span>⚡</span>
+                <span id="txt-laser-power">Laser Source: ACTIVE (ON)</span>
+            </button>
+
+            <!-- Wavelength Control -->
+            <div class="control-group">
+                <div class="control-label-row">
+                    <span class="control-label">Wavelength (λ)</span>
+                    <span id="val-wavelength" class="control-value">650.0 nm</span>
+                </div>
+                <input type="range" id="slider-wavelength" min="350" max="850" step="0.5" value="650.0">
+                <span id="lbl-wavelength-color" style="font-size:0.75rem;color:#ef4444;font-weight:600;">Visible Red (650.0 nm)</span>
+                
+                <div class="preset-grid">
+                    <button class="btn-preset active" data-wl="650">650nm Red</button>
+                    <button class="btn-preset" data-wl="532">532nm Green</button>
+                    <button class="btn-preset" data-wl="405">405nm Violet</button>
+                    <button class="btn-preset" data-wl="589">589nm Yellow</button>
+                    <button class="btn-preset" data-wl="350">350nm UV</button>
+                    <button class="btn-preset" data-wl="850">850nm IR</button>
+                </div>
+            </div>
+
+            <!-- Slit Separation (d) -->
+            <div class="control-group">
+                <div class="control-label-row">
+                    <span class="control-label">Slit Separation (d)</span>
+                    <span id="val-separation" class="control-value">0.50 mm</span>
+                </div>
+                <input type="range" id="slider-separation" min="0.05" max="0.80" step="0.01" value="0.50">
+                <span style="font-size:0.72rem;color:var(--text-muted);">Center-to-center distance between slits</span>
+            </div>
+
+            <!-- Slit Width (a) -->
+            <div class="control-group">
+                <div class="control-label-row">
+                    <span class="control-label">Slit Width (a)</span>
+                    <span id="val-width" class="control-value">0.10 mm</span>
+                </div>
+                <input type="range" id="slider-width" min="0.01" max="0.10" step="0.005" value="0.10">
+                <span style="font-size:0.72rem;color:var(--text-muted);">Single-slit diffraction envelope width</span>
+            </div>
+
+            <!-- Screen Distance (D) -->
+            <div class="control-group">
+                <div class="control-label-row">
+                    <span class="control-label">Screen Distance (D)</span>
+                    <span id="val-distance" class="control-value">2.00 m</span>
+                </div>
+                <input type="range" id="slider-distance" min="0.40" max="2.40" step="0.02" value="2.00">
+                <span style="font-size:0.72rem;color:var(--text-muted);">Measured along optical rail from slit plane</span>
+            </div>
+
+            <!-- Slit Configuration Toggles -->
+            <div class="control-group">
+                <span class="control-label" style="margin-bottom:4px;">Aperture Slit Selection</span>
+                <div class="btn-toggle-group">
+                    <button id="slit-both" class="btn-toggle active">Both Slits</button>
+                    <button id="slit-left" class="btn-toggle">Left Slit</button>
+                    <button id="slit-right" class="btn-toggle">Right Slit</button>
+                    <button id="slit-closed" class="btn-toggle">Both Closed</button>
+                </div>
+            </div>
+
+            <!-- Which-Path / Coherence Visibility -->
+            <div class="control-group">
+                <div class="control-label-row">
+                    <span class="control-label">Which-Path Visibility (V)</span>
+                    <span id="val-visibility" class="control-value">1.00 (Coherent)</span>
+                </div>
+                <input type="range" id="slider-visibility" min="0.0" max="1.0" step="0.05" value="1.0">
+                <span style="font-size:0.72rem;color:var(--text-muted);">1.0 = Pure wave interference, 0.0 = Which-path decoherence</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 3. Right Sidebar: Telemetry, Intensity Profile, Quantum & Lesson -->
+    <aside class="right-panel glass-panel">
+        <div class="panel-header">
+            <span class="panel-title">📊 Optical Telemetry & Analysis</span>
+            <span id="active-mode-label" style="font-size:0.75rem;color:var(--accent-blue);font-weight:600;">Classical Mode</span>
+        </div>
+
+        <div class="scroll-content">
+            <!-- Telemetry Card -->
+            <div class="telemetry-card">
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Calculated Fringe Spacing (β):</span>
+                    <span id="tel-fringe-width" class="telemetry-val" style="color:var(--accent-emerald);">3.80 mm</span>
+                </div>
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Formula β = λ·D / d:</span>
+                    <span id="tel-formula" class="telemetry-val" style="font-size:0.75rem;color:var(--accent-cyan);">(632.8nm × 1.20m) / 0.20mm</span>
+                </div>
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Diffraction First Null:</span>
+                    <span id="tel-diff-null" class="telemetry-val">18.98 mm</span>
+                </div>
+            </div>
+
+            <!-- Real-time Intensity Profile Graph -->
+            <div class="control-group">
+                <div class="control-label-row">
+                    <span class="control-label">Intensity Profile I(x)</span>
+                    <span style="font-size:0.7rem;color:var(--text-muted);">Horizontal Cross-Section</span>
+                </div>
+                <canvas id="profile-canvas" width="340" height="75"></canvas>
+            </div>
+
+            <!-- Interactive Screen Position Sampler -->
+            <div class="probe-box">
+                <div style="font-weight:600;color:var(--accent-cyan);margin-bottom:2px;">📍 Screen Coordinate Sampler</div>
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Position (x):</span>
+                    <span id="probe-x" class="telemetry-val">+0.00 mm (Center Axis)</span>
+                </div>
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Geometric Path Diff (Δr):</span>
+                    <span id="probe-dr" class="telemetry-val">0.0 nm (0.000 λ)</span>
+                </div>
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Phase Difference (Δφ):</span>
+                    <span id="probe-dphi" class="telemetry-val">0.00 rad (0.0°)</span>
+                </div>
+                <div class="telemetry-row">
+                    <span class="telemetry-label">Interference State:</span>
+                    <span id="probe-state" class="telemetry-val" style="color:var(--accent-emerald);">Central Maximum (m = 0)</span>
+                </div>
+            </div>
+
+            <!-- Quantum Single-Photon Module (Shown in Quantum Mode) -->
+            <div id="quantum-section" class="quantum-card hidden">
+                <div style="font-weight:600;color:var(--accent-violet);display:flex;align-items:center;gap:6px;">
+                    <span>⚛️</span>
+                    <span>Single-Photon Quantum Detection</span>
+                </div>
+                
+                <div class="counter-grid">
+                    <div class="counter-box">
+                        <div style="font-size:0.7rem;color:var(--text-muted);">Photons Emitted</div>
+                        <div id="cnt-emitted" class="counter-num">0</div>
+                    </div>
+                    <div class="counter-box">
+                        <div style="font-size:0.7rem;color:var(--text-muted);">Photons Detected</div>
+                        <div id="cnt-detected" class="counter-num">0</div>
+                    </div>
+                </div>
+
+                <div class="control-label-row">
+                    <span class="control-label">Emission Rate</span>
+                    <span id="val-photon-rate" class="control-value">120 / sec</span>
+                </div>
+                <input type="range" id="slider-photon-rate" min="10" max="2000" step="10" value="120">
+
+                <div class="btn-row">
+                    <button id="btn-quantum-run" class="btn-action primary">▶ Start Stream</button>
+                    <button id="btn-quantum-clear" class="btn-action">Clear Screen</button>
+                </div>
+                <div class="btn-row">
+                    <button class="btn-action btn-batch" data-count="100">+100</button>
+                    <button class="btn-action btn-batch" data-count="1000">+1,000</button>
+                    <button class="btn-action btn-batch" data-count="5000">+5,000</button>
+                </div>
+            </div>
+
+            <!-- Guided 9-Minute Lesson Progression Module -->
+            <div id="lesson-section" class="lesson-card">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <span id="lesson-stage-badge" class="lesson-stage-badge">Stage 1 of 6</span>
+                    <span id="lesson-duration" style="font-size:0.7rem;color:var(--text-muted);font-family:var(--font-mono);">0:00 – 1:00</span>
+                </div>
+                <h4 id="lesson-title" class="lesson-title">Welcome & Orientation</h4>
+                <p id="lesson-prompt" class="lesson-prompt">
+                    Welcome to the Young's Double-Slit Experiment! Discover how coherent light creates an interference pattern. Explore how wavelength, slit separation, and screen distance affect the result.
+                </p>
+                <div class="lesson-action-box">
+                    <strong>Your Task:</strong> <span id="lesson-action">Turn on the laser and inspect the apparatus along the optical rail.</span>
+                </div>
+                <div class="lesson-nav-row">
+                    <button id="btn-lesson-prev" class="btn-action" style="flex:1;">← Previous</button>
+                    <button id="btn-lesson-next" class="btn-action primary" style="flex:1;">Next Stage →</button>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 4. Welcome Screen Modal -->
+    <div id="modal-welcome" class="modal-overlay">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <span style="font-size:1.4rem;">🔬</span>
+                    <h3 style="margin:0;font-size:1.15rem;">Young's Double-Slit Virtual Laboratory</h3>
+                </div>
+            </div>
+            <div class="modal-body">
+                <p>
+                    <strong>Welcome to the Young's Double-Slit Experiment!</strong><br>
+                    Discover how light creates an interference pattern. Explore how wavelength, slit separation, and screen distance affect the results.
+                </p>
+
+                <p style="font-size:0.85rem;color:#cbd5e1;">
+                    This simulation is built upon exact physical wave optics and single-photon quantum probability theory. The laboratory environment faithfully models real optical breadboard equipment, sliding rails, and He-Ne laser systems.
+                </p>
+
+                <h4>Platform-Specific Controls</h4>
+                <div class="instruction-grid">
+                    <div class="instruction-col">
+                        <h5>🥽 Meta Quest 3 / 3S</h5>
+                        <ul>
+                            <li>• <strong>Left Joystick:</strong> Continuous Walk & Strafe</li>
+                            <li>• <strong>Right Joystick:</strong> 45° Snap Turn in place</li>
+                            <li>• <strong>Push Stick / Grip:</strong> Parabolic Teleport to floor</li>
+                            <li>• <strong>Ray & Trigger:</strong> Press 3D UI & drag screen</li>
+                        </ul>
+                    </div>
+                    <div class="instruction-col">
+                        <h5>💻 Laptop / Desktop</h5>
+                        <ul>
+                            <li>• Left-click & drag to orbit camera</li>
+                            <li>• Right-click / scroll to pan & zoom</li>
+                            <li>• Click & drag sliders to adjust values</li>
+                            <li>• Space: Pause, R: Reset, H: Help</li>
+                        </ul>
+                    </div>
+                    <div class="instruction-col">
+                        <h5>🌐 Web Browser</h5>
+                        <ul>
+                            <li>• Zero installation required</li>
+                            <li>• Responsive full-screen view</li>
+                            <li>• Hover on screen to probe fringes</li>
+                            <li>• Works on touchscreens & tablets</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-start-experiment" class="btn-start">Start Experiment →</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 5. Quiz & Assessment Modal -->
+    <div id="modal-quiz" class="modal-overlay hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <span style="font-size:1.3rem;">📝</span>
+                    <h3 style="margin:0;font-size:1.1rem;">Physics Mastery Quiz: Young's Double-Slit</h3>
+                </div>
+                <button id="btn-close-quiz" class="btn-icon">✕</button>
+            </div>
+            <div class="modal-body" id="quiz-body">
+                <!-- Injected via JavaScript -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 6. Help Modal -->
+    <div id="modal-help" class="modal-overlay hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 style="margin:0;font-size:1.1rem;">❓ Keyboard Shortcuts & Guide</h3>
+                <button id="btn-close-help" class="btn-icon">✕</button>
+            </div>
+            <div class="modal-body">
+                <h4 style="margin:0 0 8px 0;font-size:0.95rem;color:var(--accent-blue);">Desktop Controls</h4>
+                <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;font-size:0.85rem;margin-bottom:14px;">
+                    <strong>Space</strong> <span>Toggle Laser Power (On / Off)</span>
+                    <strong>R</strong> <span>Reset Experiment to Default Settings</span>
+                    <strong>H</strong> <span>Toggle this Help Dialog</span>
+                    <strong>C</strong> <span>Clear Single-Photon Accumulated Detections</span>
+                    <strong>1 – 6</strong> <span>Jump directly to Lesson Stages 1 through 6</span>
+                    <strong>Mouse Drag</strong> <span>Orbit 3D Laboratory Camera</span>
+                    <strong>Scroll Wheel</strong> <span>Zoom in / out on apparatus</span>
+                </div>
+                <h4 style="margin:0 0 8px 0;font-size:0.95rem;color:var(--accent-cyan);">Meta Quest 3 / 3S VR Controls</h4>
+                <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;font-size:0.85rem;">
+                    <strong>Left Stick</strong> <span>Smooth Walk & Strafe (oriented to head yaw)</span>
+                    <strong>Right Stick (X)</strong> <span>Snap Turn 45° left / right</span>
+                    <strong>Right Stick (Push)</strong> <span>Aim Parabolic Teleport Arc; release to teleport</span>
+                    <strong>Grip Button</strong> <span>Aim Teleport Arc when pointing at floor</span>
+                    <strong>Pointer Ray</strong> <span>Point and trigger on 3D Floating Menu or Screen</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Application Core Scripts -->
+    <script src="./ydse_physics.js?v=2.3"></script>
+    <script src="./ydse_quantum.js?v=2.3"></script>
+    <script src="./lesson.js?v=2.3"></script>
+    <script type="module" src="./main.js?v=3.0"></script>
+</body>
+</html>

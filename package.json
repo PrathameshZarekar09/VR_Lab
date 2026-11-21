@@ -1,0 +1,25 @@
+{
+  "name": "ydse-virtual-laboratory",
+  "version": "2.0.0",
+  "description": "Interactive Young's Double-Slit Experiment Simulation supporting Meta Quest 3/3S, Desktop, and Web Browser.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test_physics.js"
+  },
+  "keywords": [
+    "ydse",
+    "physics",
+    "optics",
+    "quantum",
+    "webxr",
+    "threejs",
+    "meta-quest",
+    "education"
+  ],
+  "author": "Antigravity XR Lab",
+  "license": "MIT",
+  "dependencies": {
+    "three": "^0.185.1"
+  }
+}

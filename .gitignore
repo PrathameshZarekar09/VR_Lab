@@ -1,0 +1,40 @@
+
+# ==========================================
+# YDSE Virtual Laboratory - Git Ignore
+# ==========================================
+
+# Dependencies
+node_modules/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# SSL certificates and private keys
+cert.pem
+key.pem
+*.key
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor settings
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
