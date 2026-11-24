@@ -18,6 +18,8 @@ const SLIT_Z = -0.46;                 // Fixed Z position of double slit carriag
 const OPTICAL_AXIS_Y = 1.16;          // Height of laser beam optical axis in meters
 const OPTICAL_AXIS_X = 0.00;          // Centered horizontal optical axis
 const SCREEN_PHYSICAL_HALF_WIDTH = 0.25; // 0.50m total active sampling area on screen
+const VR_PLAYER_HEIGHT_OFFSET = 0.42; // Raises VR user eye height to match lab bench & room scale
+const DESKTOP_EYE_HEIGHT = 1.78;      // Natural standing eye height above the 1.16m bench axis
 
 const state = {
     mode: 'classical', // 'classical' | 'quantum'
@@ -28,7 +30,8 @@ const state = {
     mouseRay: new THREE.Raycaster(),
     mousePos: new THREE.Vector2(-999, -999),
     hoverScreenX: 0.0,
-    audioActive: false,
+    audioActive: true,
+    hasEnteredSimulation: false,
 
     // WebXR Locomotion & Teleportation State
     xrSnapTurnLocked: false,
@@ -55,14 +58,161 @@ const state = {
     activeMousePanelDrag: null,
     mouseOverPanelHandle: false,
 
+    // 3D VR Welcome Briefing Drag & Drop State
+    activeVRWelcomeDrag: null,
+    activeMouseWelcomeDrag: null,
+    mouseOverWelcomeHandle: false,
+
     // Welcome Kiosk Drag & Drop State
     activeVRKioskDrag: null,
     activeMouseKioskDrag: null,
 
     // Welcome Kiosk Educational Tab State: 'aim' | 'diagram' | 'results' | 'lesson' | 'quiz'
     kioskTab: 'aim',
-    kioskQuizIndex: 0
+    kioskQuizIndex: 0,
+
+    // Experiment Observation Sequence State (under Voice UI)
+    activeObsStep: 0,
+    observedSteps: { wavelength: false, slit: false, screen: false, quantum: false },
+    autoNarratedObs: { wavelength: false, slit: false, screen: false, quantum: false }
 };
+
+const OBSERVATION_SEQUENCE = [
+    {
+        id: 'wavelength',
+        stepNum: 1,
+        shortTitle: '1. Wavelength (λ)',
+        tryText: 'Try: Change Wavelength (λ) — test 650nm Red, 532nm Green, or 405nm Violet.',
+        getEffectText: () => {
+            const nm = (physics.wavelength * 1e9).toFixed(1);
+            const betaMm = (physics.getFringeSpacing() * 1e3).toFixed(2);
+            return `At λ = ${nm} nm, fringe width is β = ${betaMm} mm. Shorter wavelengths (Violet/Blue) compress fringes closer together (β ∝ λ); longer wavelengths (Red) spread them wider and shift beam color.`;
+        },
+        spokenText: 'Step 1, Wavelength. Changing wavelength alters both the laser beam color and fringe width. Shorter violet wavelengths compress fringes closer together, while longer red wavelengths spread them wider.'
+    },
+    {
+        id: 'slit',
+        stepNum: 2,
+        shortTitle: '2. Slits (d & Aperture)',
+        tryText: 'Try: Adjust Slit Separation (d) or toggle Left / Right Slit open/closed.',
+        getEffectText: () => {
+            const dMm = (physics.slitSeparation * 1e3).toFixed(2);
+            const aMm = (physics.slitWidth * 1e3).toFixed(2);
+            if (!physics.leftSlitOpen && !physics.rightSlitOpen) {
+                return 'Both slits are closed: light is completely blocked and the screen stays dark.';
+            }
+            if (!physics.leftSlitOpen || !physics.rightSlitOpen) {
+                return `Only one slit is open (a = ${aMm} mm): two-beam interference disappears, leaving a single-slit Fraunhofer diffraction pattern.`;
+            }
+            return `With both slits open (d = ${dMm} mm): increasing d makes fringes narrower (β ∝ 1/d); decreasing d spreads them apart. Closing one slit removes the interference stripes.`;
+        },
+        spokenText: 'Step 2, Slits. Increasing slit separation d narrows the fringe spacing. Closing one slit removes two-beam interference, leaving only a wide single-slit diffraction band.'
+    },
+    {
+        id: 'screen',
+        stepNum: 3,
+        shortTitle: '3. Observation Screen (D)',
+        tryText: 'Try: Drag Observation Screen or adjust Screen Distance (D) along the rail.',
+        getEffectText: () => {
+            const dm = physics.screenDistance.toFixed(2);
+            const betaMm = (physics.getFringeSpacing() * 1e3).toFixed(2);
+            return `Screen distance D = ${dm} m → β = ${betaMm} mm. Moving the screen further away stretches the interference fringes proportionally wider across the screen (β = λD/d).`;
+        },
+        spokenText: 'Step 3, Observation Screen. Moving the observation screen further along the optical rail increases screen distance D, stretching the interference pattern wider across the screen.'
+    },
+    {
+        id: 'quantum',
+        stepNum: 4,
+        shortTitle: '4. Quantum Mode',
+        tryText: 'Try: Switch to Quantum Single-Photon Mode and start/emit photons.',
+        getEffectText: () => {
+            const det = quantum ? quantum.photonsDetected : 0;
+            return `Photons detected: ${det.toLocaleString()}. Each photon arrives as an individual localized dot, yet thousands of detections accumulate into the exact same wave interference pattern.`;
+        },
+        spokenText: 'Step 4, Quantum Single-Photon Mode. Each photon arrives at the screen as a single localized dot, yet thousands of detections build up the exact same interference pattern.'
+    }
+];
+
+function getObsReadoutString() {
+    const nm = (physics.wavelength * 1e9).toFixed(0);
+    const dMm = (physics.slitSeparation * 1e3).toFixed(2);
+    const dm = physics.screenDistance.toFixed(2);
+    const betaMm = (physics.getFringeSpacing() * 1e3).toFixed(2);
+    return `λ=${nm}nm · d=${dMm}mm · D=${dm}m → β=${betaMm}mm`;
+}
+
+function syncObservationSequenceUI() {
+    const stepIdx = Math.max(0, Math.min(OBSERVATION_SEQUENCE.length - 1, state.activeObsStep));
+    const currentStep = OBSERVATION_SEQUENCE[stepIdx];
+
+    const readoutEl = document.getElementById('obs-live-readout');
+    if (readoutEl) readoutEl.innerText = getObsReadoutString();
+
+    const listEl = document.getElementById('obs-steps-list');
+    if (listEl) {
+        if (listEl.children.length !== OBSERVATION_SEQUENCE.length) {
+            listEl.innerHTML = '';
+            OBSERVATION_SEQUENCE.forEach((step, idx) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'obs-step-btn';
+                btn.dataset.obsIdx = String(idx);
+                btn.innerHTML = `<span>${step.shortTitle}</span><span class="obs-step-badge">▶</span>`;
+                btn.addEventListener('click', () => selectObservationStep(idx, { narrate: true }));
+                listEl.appendChild(btn);
+            });
+        }
+        Array.from(listEl.children).forEach((btn, idx) => {
+            const step = OBSERVATION_SEQUENCE[idx];
+            const isDone = !!state.observedSteps[step.id];
+            const isActive = idx === stepIdx;
+            btn.classList.toggle('active', isActive);
+            btn.classList.toggle('done', isDone);
+            const badge = btn.querySelector('.obs-step-badge');
+            if (badge) badge.innerText = isDone ? '✓' : (isActive ? '▶' : '•');
+        });
+    }
+
+    const tryEl = document.getElementById('obs-detail-try');
+    if (tryEl) tryEl.innerText = currentStep.tryText;
+
+    const effEl = document.getElementById('obs-detail-effect');
+    if (effEl) effEl.innerText = 'What happens: ' + currentStep.getEffectText();
+
+    if (typeof redrawVRWelcomeTexture === 'function') {
+        redrawVRWelcomeTexture();
+    }
+}
+
+function selectObservationStep(idx, { narrate = false } = {}) {
+    if (idx < 0 || idx >= OBSERVATION_SEQUENCE.length) return;
+    state.activeObsStep = idx;
+    syncObservationSequenceUI();
+
+    const step = OBSERVATION_SEQUENCE[idx];
+    if (narrate && narration && narration.enabled) {
+        state.autoNarratedObs[step.id] = true;
+        narration.narrateObservation(step.stepNum, step.spokenText);
+    }
+}
+
+function recordObservationChange(stepId) {
+    if (!state.hasEnteredSimulation) return;
+    const idx = OBSERVATION_SEQUENCE.findIndex(s => s.id === stepId);
+    if (idx === -1) return;
+
+    const firstTime = !state.observedSteps[stepId];
+    state.observedSteps[stepId] = true;
+    state.activeObsStep = idx;
+    syncObservationSequenceUI();
+
+    // Auto-explain on first parameter change only if not already speaking welcome or another track
+    if (firstTime && !state.autoNarratedObs[stepId] && narration && narration.enabled && !narration.isSpeaking) {
+        state.autoNarratedObs[stepId] = true;
+        const step = OBSERVATION_SEQUENCE[idx];
+        narration.narrateObservation(step.stepNum, step.spokenText);
+    }
+}
 
 // Instantiate shared physics engine and quantum simulator
 const physics = new YDSEPhysicsModel({
@@ -87,11 +237,11 @@ const quantum = new YDSEQuantumSimulator(physics, {
 // =============================================================================
 function teleportToBench() {
     if (renderer && renderer.xr && renderer.xr.isPresenting) {
-        xrRig.position.set(0.85, 0, 0.20);
+        xrRig.position.set(0.85, VR_PLAYER_HEIGHT_OFFSET, 0.20);
         xrRig.rotation.set(0, -Math.PI / 4, 0);
     } else if (camera && controls) {
-        camera.position.set(1.65, 1.45, 0.95);
-        controls.target.set(0, 1.05, -0.6);
+        camera.position.set(1.65, DESKTOP_EYE_HEIGHT, 0.95);
+        controls.target.set(0, 1.16, -0.6);
         controls.update();
     }
 }
@@ -140,6 +290,80 @@ function renderQuiz() {
     });
 }
 
+const DEFAULT_WELCOME_CAPTION =
+    'Here is the full setup of the experiment: coherent laser light passes through the double-slit carriage along the optical rail onto the movable observation screen.';
+
+function syncNarrationUI(narrationState) {
+    state.audioActive = narrationState.enabled;
+
+    const eq = document.getElementById('narration-eq');
+    if (eq) {
+        eq.classList.toggle('speaking', narrationState.enabled && narrationState.isSpeaking);
+        eq.classList.toggle('muted', !narrationState.enabled);
+    }
+
+    const caption = document.getElementById('narration-caption');
+    if (caption) {
+        if (!narrationState.enabled) {
+            caption.innerText = 'Voice narration is muted. Click "Voice: MUTED" or press M to re-enable audio guidance.';
+        } else if (narrationState.isSpeaking && narrationState.currentSentence) {
+            caption.innerText = narrationState.currentSentence;
+        } else {
+            caption.innerText = DEFAULT_WELCOME_CAPTION;
+        }
+    }
+
+    const navAudioBtn = document.getElementById('btn-audio');
+    if (navAudioBtn) {
+        navAudioBtn.innerText = narrationState.enabled ? '🔇 Mute' : '🔊 Unmute';
+        navAudioBtn.classList.toggle('active', narrationState.enabled);
+        navAudioBtn.classList.toggle('muted', !narrationState.enabled);
+    }
+
+    const toggleBtn = document.getElementById('btn-toggle-narration');
+    if (toggleBtn) {
+        toggleBtn.innerText = narrationState.enabled ? '🔇 Mute' : '🔊 Unmute';
+        toggleBtn.classList.toggle('is-muted', !narrationState.enabled);
+    }
+
+    if (typeof vrPanelMuteBtn !== 'undefined' && vrPanelMuteBtn && vrPanelMuteBtn.userData.drawBtn) {
+        vrPanelMuteBtn.userData.drawBtn(
+            narrationState.enabled ? '🔇 Mute Voice' : '🔊 Unmute',
+            narrationState.enabled ? '#f59e0b' : '#10b981'
+        );
+    }
+
+    if (typeof redrawVRWelcomeTexture === 'function') {
+        redrawVRWelcomeTexture(narrationState);
+    }
+}
+
+const narration = (typeof YDSENarrationEngine !== 'undefined')
+    ? new YDSENarrationEngine({ onStateChange: syncNarrationUI })
+    : null;
+if (narration) {
+    narration.preload();
+}
+
+function enterSimulationWithWelcome({ isVR = false } = {}) {
+    state.hasEnteredSimulation = true;
+    const welcomeToast = document.getElementById('welcome-narration-ui');
+
+    if (isVR) {
+        if (welcomeToast) welcomeToast.classList.add('hidden');
+        if (typeof showVRWelcomePanel === 'function') {
+            showVRWelcomePanel();
+        }
+    } else if (welcomeToast) {
+        welcomeToast.classList.remove('hidden');
+    }
+    syncObservationSequenceUI();
+
+    if (narration) {
+        narration.narrateWelcome({ chime: true });
+    }
+}
+
 const lesson = new YDSELessonDirector({ physicsModel: physics, quantumSimulator: quantum }, {
     onStageChange: (stage) => {
         const badge = document.getElementById('lesson-stage-badge');
@@ -159,6 +383,10 @@ const lesson = new YDSELessonDirector({ physicsModel: physics, quantumSimulator:
             if (modal) modal.classList.remove('hidden');
         }
 
+        if (state.hasEnteredSimulation && narration && narration.enabled) {
+            narration.narrateStage(stage);
+        }
+
         redrawKioskTexture();
     }
 });
@@ -175,8 +403,8 @@ const xrRig = new THREE.Group();
 xrRig.name = 'xrRig';
 scene.add(xrRig);
 
-const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.05, 100);
-camera.position.set(1.95, 1.45, 0.40); // Ergonomic viewing angle looking at rail and screen
+const camera = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.05, 100);
+camera.position.set(1.95, DESKTOP_EYE_HEIGHT, 0.40); // Ergonomic eye-level viewing angle looking at rail and screen
 xrRig.add(camera);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -699,6 +927,28 @@ function redrawConsoleTexture(hoverPt = null) {
     // -------------------------------------------------------------
     // BUTTONS (Bottom Row)
     // -------------------------------------------------------------
+    const isLaser = physics.laserActive;
+    const isQuantum = state.mode === 'quantum';
+
+    // QUANTUM MODE Button (Left Column directly below Wavelength / Slit / Screen sliders)
+    const qX = 50, qY = 485, qW = 450, qH = 55;
+    const isQuantumBtnHovered = hoverPt && (hoverPt.x >= qX && hoverPt.x <= qX + qW && hoverPt.y >= qY && hoverPt.y <= qY + qH);
+    consoleCtx.fillStyle = isQuantum
+        ? (isQuantumBtnHovered ? 'rgba(139, 92, 246, 0.38)' : 'rgba(139, 92, 246, 0.24)')
+        : (isQuantumBtnHovered ? 'rgba(139, 92, 246, 0.22)' : 'rgba(139, 92, 246, 0.12)');
+    consoleCtx.beginPath();
+    if (consoleCtx.roundRect) consoleCtx.roundRect(qX, qY, qW, qH, 8);
+    else consoleCtx.rect(qX, qY, qW, qH);
+    consoleCtx.fill();
+    consoleCtx.strokeStyle = isQuantum ? '#a78bfa' : '#8b5cf6';
+    consoleCtx.lineWidth = (isQuantum || isQuantumBtnHovered) ? 3 : 2;
+    consoleCtx.stroke();
+
+    consoleCtx.fillStyle = isQuantum ? '#ede9fe' : '#c4b5fd';
+    consoleCtx.font = 'bold 20px sans-serif';
+    consoleCtx.textAlign = 'center';
+    consoleCtx.fillText(isQuantum ? '⚛ QUANTUM MODE: ON  (Click for Wave)' : '⚛ QUANTUM MODE: OFF  (Click for Photons)', qX + qW / 2, qY + 35);
+
     // RESET Button
     const rX = 570, rY = 485, rW = 180, rH = 55;
     consoleCtx.fillStyle = 'rgba(56, 189, 248, 0.12)';
@@ -717,7 +967,6 @@ function redrawConsoleTexture(hoverPt = null) {
 
     // PAUSE / RESUME Button
     const pX = 780, pY = 485, pW = 240, pH = 55;
-    const isLaser = physics.laserActive;
     consoleCtx.fillStyle = isLaser ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)';
     consoleCtx.beginPath();
     if (consoleCtx.roundRect) consoleCtx.roundRect(pX, pY, pW, pH, 6);
@@ -799,6 +1048,12 @@ function interactWithConsole(cx, cy, isDown, specificSliderId = null) {
 
     // 3. Only on initial press (isDown) for buttons
     if (isDown) {
+        // QUANTUM MODE Button (under sliders): X in [50, 500], Y in [485, 540]
+        if (cx >= 50 && cx <= 500 && cy >= 485 && cy <= 540) {
+            toggleQuantumMode();
+            return { type: 'button', id: 'quantum-mode' };
+        }
+
         // RESET Button: X in [570, 750], Y in [485, 540]
         if (cx >= 570 && cx <= 750 && cy >= 485 && cy <= 540) {
             resetExperiment();
@@ -2569,24 +2824,33 @@ function updateBeams() {
     const laserColor = new THREE.Color(rgb.r, rgb.g, rgb.b);
 
     if (laserApertureMesh) {
+        laserApertureMesh.visible = isVisible;
         laserApertureMesh.material.color.copy(laserColor);
         laserApertureMesh.material.emissive.copy(laserColor);
         laserApertureMesh.material.emissiveIntensity = isVisible ? 2.8 : 0.0;
+    }
+
+    // Update any beam/aperture materials found in Lab_Setup.glb (darken completely when laser is OFF)
+    for (const mat of dynamicModelMaterials) {
+        if (!isVisible) {
+            if (mat.color) mat.color.setHex(0x1e293b);
+            if (mat.emissive) {
+                mat.emissive.setHex(0x000000);
+                mat.emissiveIntensity = 0.0;
+            }
+        } else {
+            if (mat.color) mat.color.copy(laserColor);
+            if (mat.emissive) {
+                mat.emissive.copy(laserColor);
+                mat.emissiveIntensity = 1.2;
+            }
+        }
     }
 
     if (!isVisible) return;
 
     beamMaterial.color.copy(laserColor);
     beamGlowMaterial.color.copy(laserColor);
-
-    // Update any beam/aperture materials found in Lab_Setup.glb
-    for (const mat of dynamicModelMaterials) {
-        if (mat.color) mat.color.copy(laserColor);
-        if (mat.emissive) {
-            mat.emissive.copy(laserColor);
-            mat.emissiveIntensity = 1.2;
-        }
-    }
 
     // Laser aperture at Z = 1.63m -> Double slit at Z = -0.46m
     const laserApertureZ = 1.63;
@@ -2623,11 +2887,18 @@ loader.load(
         console.log('✅ Loaded Lab_Setup.glb with 26 nodes intact.');
 
         labRoot.traverse((node) => {
+            // Hide the static model beam node (GLTFLoader sanitizes spaces/| into underscores like Laser_beam__optical_axis)
+            const lowerName = (node.name || '').toLowerCase();
+            if (/laser[\s_]*beam|optical[\s_]*axis/.test(lowerName)) {
+                node.visible = false;
+                return;
+            }
+
             if (node.isMesh) {
                 node.castShadow = true;
                 node.receiveShadow = true;
 
-                // Cache materials named 'beam' so their color updates with wavelength
+                // Cache materials named 'beam' so their color/glow updates with wavelength & laser power
                 if (node.material) {
                     const mats = Array.isArray(node.material) ? node.material : [node.material];
                     for (const m of mats) {
@@ -2635,11 +2906,6 @@ loader.load(
                             if (!dynamicModelMaterials.includes(m)) dynamicModelMaterials.push(m);
                         }
                     }
-                }
-
-                // Hide the static model beam so our wavelength-accurate dynamic beam is seen clearly
-                if (node.name && node.name.toLowerCase().includes('laser beam')) {
-                    node.visible = false;
                 }
 
                 // Identify Observation Screen Assembly
@@ -2880,11 +3146,12 @@ controller1.add(new THREE.Line(rayGeo, rayMat));
 // XR Session Handlers
 renderer.xr.addEventListener('sessionstart', () => {
     controls.enabled = false;
-    // Comfortable default position in front of the optical rail facing apparatus
-    xrRig.position.set(0.85, 0.0, 0.20);
+    // Comfortable default position in front of the optical rail facing apparatus at eye height
+    xrRig.position.set(0.85, VR_PLAYER_HEIGHT_OFFSET, 0.20);
     xrRig.rotation.set(0, -Math.PI / 4, 0);
     state.isTeleportAiming = false;
     state.isTeleportValid = false;
+    enterSimulationWithWelcome({ isVR: true });
 });
 
 renderer.xr.addEventListener('sessionend', () => {
@@ -2895,6 +3162,7 @@ renderer.xr.addEventListener('sessionend', () => {
     state.isTeleportValid = false;
     teleportReticleGroup.visible = false;
     teleportArc.visible = false;
+    if (typeof vrWelcomeGroup !== 'undefined') vrWelcomeGroup.visible = false;
 });
 
 // -----------------------------------------------------------------------------
@@ -3004,7 +3272,7 @@ function executeTeleport() {
 
     xrRig.position.x = state.teleportTarget.x - headOffsetX;
     xrRig.position.z = state.teleportTarget.z - headOffsetZ;
-    xrRig.position.y = 0.0;
+    xrRig.position.y = VR_PLAYER_HEIGHT_OFFSET;
 
     if (state.activeTeleportController) {
         const inputSource = state.activeTeleportController.userData.inputSource;
@@ -3068,7 +3336,7 @@ function updateXRLocomotion(delta) {
                 // Clamp within laboratory walkable boundaries
                 xrRig.position.x = THREE.MathUtils.clamp(xrRig.position.x, -3.4, 3.4);
                 xrRig.position.z = THREE.MathUtils.clamp(xrRig.position.z, -2.9, 2.9);
-                xrRig.position.y = 0.0;
+                xrRig.position.y = VR_PLAYER_HEIGHT_OFFSET;
             }
         }
 
@@ -3181,7 +3449,7 @@ function updateXRLocomotion(delta) {
 // -----------------------------------------------------------------------------
 const vrPanelGroup = new THREE.Group();
 vrPanelGroup.name = 'VR_Floating_Control_Screen';
-vrPanelGroup.position.set(0.65, 1.25, -0.65);
+vrPanelGroup.position.set(0.65, 1.48, -0.65);
 vrPanelGroup.rotation.y = -Math.PI / 4;
 scene.add(vrPanelGroup);
 
@@ -3194,12 +3462,12 @@ const vrPanelChassisMat = new THREE.MeshStandardMaterial({
     opacity: 0.94,
     side: THREE.DoubleSide
 });
-const vrPanelChassisMesh = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.68, 0.015), vrPanelChassisMat);
-vrPanelChassisMesh.position.set(0, 0.06, -0.012);
+const vrPanelChassisMesh = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.76, 0.015), vrPanelChassisMat);
+vrPanelChassisMesh.position.set(0, 0.02, -0.012);
 vrPanelChassisMesh.name = 'VR_Panel_Chassis';
 vrPanelGroup.add(vrPanelChassisMesh);
 
-const chassisEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.62, 0.68, 0.015));
+const chassisEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.62, 0.76, 0.015));
 const chassisLine = new THREE.LineSegments(chassisEdges, new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.45 }));
 chassisLine.position.copy(vrPanelChassisMesh.position);
 vrPanelGroup.add(chassisLine);
@@ -3264,7 +3532,7 @@ function redrawGrabHandle(handleState = 'normal') {
 redrawGrabHandle('normal');
 
 function resetVRPanelPosition() {
-    vrPanelGroup.position.set(0.65, 1.25, -0.65);
+    vrPanelGroup.position.set(0.65, 1.48, -0.65);
     vrPanelGroup.rotation.set(0, -Math.PI / 4, 0);
     redrawGrabHandle('normal');
 }
@@ -3299,13 +3567,9 @@ function endVRPanelDrag() {
     }
 }
 
-function updateVRPanelDrag(delta) {
-    if (!renderer.xr.isPresenting || !state.activeVRPanelDrag) return;
-
-    const drag = state.activeVRPanelDrag;
+function applyFloatingGroupDrag(targetGroup, drag, delta) {
+    if (!targetGroup || !drag || !drag.controller) return;
     const ctrl = drag.controller;
-    if (!ctrl) return;
-
     ctrl.updateMatrixWorld(true);
 
     // Push / Pull distance via controller thumbstick
@@ -3326,15 +3590,25 @@ function updateVRPanelDrag(delta) {
 
     // Clamp inside walkable laboratory bounds
     targetPos.x = THREE.MathUtils.clamp(targetPos.x, -3.8, 3.8);
-    targetPos.y = THREE.MathUtils.clamp(targetPos.y, 0.4, 2.5);
+    targetPos.y = THREE.MathUtils.clamp(targetPos.y, 0.4, 2.8);
     targetPos.z = THREE.MathUtils.clamp(targetPos.z, -3.6, 3.6);
 
-    vrPanelGroup.position.lerp(targetPos, 0.28);
+    targetGroup.position.lerp(targetPos, 0.28);
 
     // Billboard to face player's head
     const headPos = new THREE.Vector3();
     camera.getWorldPosition(headPos);
-    vrPanelGroup.lookAt(headPos.x, vrPanelGroup.position.y, headPos.z);
+    targetGroup.lookAt(headPos.x, targetGroup.position.y, headPos.z);
+}
+
+function updateVRPanelDrag(delta) {
+    if (!renderer.xr.isPresenting) return;
+    if (state.activeVRPanelDrag) {
+        applyFloatingGroupDrag(vrPanelGroup, state.activeVRPanelDrag, delta);
+    }
+    if (state.activeVRWelcomeDrag) {
+        applyFloatingGroupDrag(vrWelcomeGroup, state.activeVRWelcomeDrag, delta);
+    }
 }
 
 // Header Display Card on VR Panel
@@ -3388,15 +3662,22 @@ function createVRButton3D(text, x, y, onClick, isAction = false) {
     const canvas = document.createElement('canvas');
     canvas.width = 256; canvas.height = 64;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#0f172a'; ctx.fillRect(0, 0, 256, 64);
-    ctx.strokeStyle = isAction ? '#38bdf8' : '#64748b'; ctx.lineWidth = 3; ctx.strokeRect(2, 2, 252, 60);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(text, 128, 40);
-    
     const tex = new THREE.CanvasTexture(canvas);
+
+    const drawBtn = (label, borderHex = isAction ? '#38bdf8' : '#64748b') => {
+        ctx.fillStyle = '#0f172a'; ctx.fillRect(0, 0, 256, 64);
+        ctx.strokeStyle = borderHex; ctx.lineWidth = 3; ctx.strokeRect(2, 2, 252, 60);
+        ctx.fillStyle = '#ffffff'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, 128, 32);
+        tex.needsUpdate = true;
+    };
+
+    drawBtn(text);
     const mat = new THREE.MeshBasicMaterial({ map: tex });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.24, 0.06), mat);
     mesh.position.set(x, y, 0);
-    mesh.userData = { onClick, text, isAction };
+    mesh.userData = { onClick, drawBtn, text, isAction };
     vrPanelGroup.add(mesh);
     vrButtons.push(mesh);
     return mesh;
@@ -3412,6 +3693,342 @@ createVRButton3D('◀ Screen Closer', -0.14, -0.15, () => setScreenDistance(phys
 createVRButton3D('▶ Screen Further', 0.14, -0.15, () => setScreenDistance(physics.screenDistance + 0.15));
 createVRButton3D('🎯 Reset Pos', -0.14, -0.22, resetVRPanelPosition, true);
 createVRButton3D('👁 Face Me', 0.14, -0.22, orientVRPanelToUser, true);
+createVRButton3D('🔁 Replay Voice', -0.14, -0.29, () => {
+    if (narration) {
+        narration.setEnabled(true);
+        narration.narrateWelcome({ chime: true });
+    }
+}, true);
+const vrPanelMuteBtn = createVRButton3D('🔇 Mute Voice', 0.14, -0.29, () => {
+    if (narration) narration.toggleMute();
+}, true);
+vrPanelMuteBtn.userData.drawBtn('🔇 Mute Voice', '#f59e0b');
+
+// -----------------------------------------------------------------------------
+// 3D VR WELCOME UI PANEL (Shown when entering WebXR VR Simulation)
+// -----------------------------------------------------------------------------
+const vrWelcomeGroup = new THREE.Group();
+vrWelcomeGroup.name = 'VR_Welcome_Banner_Panel';
+vrWelcomeGroup.visible = false;
+scene.add(vrWelcomeGroup);
+
+const vrWelcomeCanvas = document.createElement('canvas');
+vrWelcomeCanvas.width = 1024;
+vrWelcomeCanvas.height = 780;
+const vrWelcomeCtx = vrWelcomeCanvas.getContext('2d');
+const vrWelcomeTex = new THREE.CanvasTexture(vrWelcomeCanvas);
+vrWelcomeTex.colorSpace = THREE.SRGBColorSpace;
+
+const vrWelcomeScreenMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.98, 0.746),
+    new THREE.MeshBasicMaterial({ map: vrWelcomeTex })
+);
+vrWelcomeGroup.add(vrWelcomeScreenMesh);
+
+const vrWelcomeBacking = new THREE.Mesh(
+    new THREE.BoxGeometry(1.01, 0.825, 0.014),
+    new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.6 })
+);
+vrWelcomeBacking.position.set(0, 0.032, -0.01);
+vrWelcomeBacking.name = 'VR_Welcome_Chassis';
+vrWelcomeGroup.add(vrWelcomeBacking);
+
+const vrWelcomeOutline = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(1.01, 0.825, 0.014)),
+    new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.5 })
+);
+vrWelcomeOutline.position.copy(vrWelcomeBacking.position);
+vrWelcomeGroup.add(vrWelcomeOutline);
+
+// Top Grab Handle Bar for 3D VR Welcome UI (Grabbable via Grip, Trigger, or Mouse Drag)
+const welcomeGrabCanvas = document.createElement('canvas');
+welcomeGrabCanvas.width = 768;
+welcomeGrabCanvas.height = 64;
+const welcomeGrabCtx = welcomeGrabCanvas.getContext('2d');
+const welcomeGrabTex = new THREE.CanvasTexture(welcomeGrabCanvas);
+welcomeGrabTex.colorSpace = THREE.SRGBColorSpace;
+const vrWelcomeGrabHandleMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.94, 0.055),
+    new THREE.MeshBasicMaterial({ map: welcomeGrabTex, transparent: true })
+);
+vrWelcomeGrabHandleMesh.position.set(0, 0.408, 0.008);
+vrWelcomeGrabHandleMesh.name = 'VR_Welcome_GrabHandle';
+vrWelcomeGroup.add(vrWelcomeGrabHandleMesh);
+
+function redrawWelcomeGrabHandle(handleState = 'normal') {
+    if (!welcomeGrabCtx) return;
+    const w = 768, h = 64;
+    welcomeGrabCtx.clearRect(0, 0, w, h);
+
+    if (handleState === 'dragging') {
+        welcomeGrabCtx.fillStyle = '#0284c7';
+        welcomeGrabCtx.fillRect(0, 0, w, h);
+        welcomeGrabCtx.strokeStyle = '#ffffff';
+        welcomeGrabCtx.lineWidth = 4;
+        welcomeGrabCtx.strokeRect(2, 2, w - 4, h - 4);
+        welcomeGrabCtx.fillStyle = '#ffffff';
+        welcomeGrabCtx.font = 'bold 22px sans-serif';
+        welcomeGrabCtx.textAlign = 'center';
+        welcomeGrabCtx.textBaseline = 'middle';
+        welcomeGrabCtx.fillText('● MOVING PANEL... RELEASE TO PLACE ANYWHERE', w / 2, h / 2);
+    } else if (handleState === 'hover') {
+        welcomeGrabCtx.fillStyle = '#0f2942';
+        welcomeGrabCtx.fillRect(0, 0, w, h);
+        welcomeGrabCtx.strokeStyle = '#38bdf8';
+        welcomeGrabCtx.lineWidth = 3;
+        welcomeGrabCtx.strokeRect(2, 2, w - 4, h - 4);
+        welcomeGrabCtx.fillStyle = '#38bdf8';
+        welcomeGrabCtx.font = 'bold 21px sans-serif';
+        welcomeGrabCtx.textAlign = 'center';
+        welcomeGrabCtx.textBaseline = 'middle';
+        welcomeGrabCtx.fillText('✊ HOLD GRIP OR TRIGGER TO GRAB & MOVE PANEL', w / 2, h / 2);
+    } else {
+        welcomeGrabCtx.fillStyle = '#0a1220';
+        welcomeGrabCtx.fillRect(0, 0, w, h);
+        welcomeGrabCtx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
+        welcomeGrabCtx.lineWidth = 2;
+        welcomeGrabCtx.strokeRect(2, 2, w - 4, h - 4);
+        welcomeGrabCtx.fillStyle = '#38bdf8';
+        welcomeGrabCtx.font = 'bold 20px sans-serif';
+        welcomeGrabCtx.textAlign = 'center';
+        welcomeGrabCtx.textBaseline = 'middle';
+        welcomeGrabCtx.fillText('⋮⋮ 🖐 GRAB HERE TO MOVE & PLACE ANYWHERE ⋮⋮', w / 2, h / 2);
+    }
+    welcomeGrabTex.needsUpdate = true;
+}
+redrawWelcomeGrabHandle('normal');
+
+function startVRWelcomeDrag(controller, holdDistance, isGrip) {
+    state.activeVRWelcomeDrag = {
+        controller,
+        holdDistance: Math.max(0.5, Math.min(4.2, holdDistance)),
+        isGrip
+    };
+    redrawWelcomeGrabHandle('dragging');
+    const inputSource = controller.userData.inputSource;
+    if (inputSource?.gamepad?.hapticActuators?.[0]) {
+        inputSource.gamepad.hapticActuators[0].pulse(0.8, 60);
+    }
+}
+
+function endVRWelcomeDrag() {
+    if (state.activeVRWelcomeDrag) {
+        const inputSource = state.activeVRWelcomeDrag.controller?.userData?.inputSource;
+        if (inputSource?.gamepad?.hapticActuators?.[0]) {
+            inputSource.gamepad.hapticActuators[0].pulse(0.5, 40);
+        }
+        state.activeVRWelcomeDrag = null;
+        redrawWelcomeGrabHandle('normal');
+    }
+}
+
+const vrWelcomeButtons = [];
+
+function createVRWelcomeButton(text, x, y, w, accentColor, onClick) {
+    const c = document.createElement('canvas');
+    c.width = 320;
+    c.height = 72;
+    const ctx = c.getContext('2d');
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+
+    const drawBtn = (label, borderHex = accentColor) => {
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(0, 0, c.width, c.height);
+        ctx.strokeStyle = borderHex;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(2, 2, c.width - 4, c.height - 4);
+        ctx.fillStyle = '#f8fafc';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, c.width / 2, c.height / 2);
+        tex.needsUpdate = true;
+    };
+
+    drawBtn(text);
+    const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(w, 0.068),
+        new THREE.MeshBasicMaterial({ map: tex })
+    );
+    mesh.position.set(x, y, 0.008);
+    mesh.userData = { onClick, drawBtn, text };
+    vrWelcomeGroup.add(mesh);
+    vrWelcomeButtons.push(mesh);
+    return mesh;
+}
+
+createVRWelcomeButton('🔁 Replay Voice', -0.30, -0.320, 0.27, '#38bdf8', () => {
+    if (narration) {
+        narration.setEnabled(true);
+        narration.narrateWelcome({ chime: true });
+    }
+});
+
+const vrWelcomeMuteBtn = createVRWelcomeButton('🔇 Mute', 0.0, -0.320, 0.27, '#f59e0b', () => {
+    if (narration) narration.toggleMute();
+});
+
+createVRWelcomeButton('✕ Dismiss', 0.30, -0.320, 0.25, '#ef4444', () => {
+    vrWelcomeGroup.visible = false;
+});
+
+const VR_WELCOME_STEP_BOXES = [
+    { idx: 0, x: 42,  y: 294, w: 460, h: 62 },
+    { idx: 1, x: 522, y: 294, w: 460, h: 62 },
+    { idx: 2, x: 42,  y: 368, w: 460, h: 62 },
+    { idx: 3, x: 522, y: 368, w: 460, h: 62 }
+];
+
+function hitTestVRWelcomeObsStep(uv) {
+    if (!uv) return -1;
+    const wx = uv.x * vrWelcomeCanvas.width;
+    const wy = (1 - uv.y) * vrWelcomeCanvas.height;
+    for (const b of VR_WELCOME_STEP_BOXES) {
+        if (wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h) {
+            return b.idx;
+        }
+    }
+    return -1;
+}
+
+function redrawVRWelcomeTexture(narrationState = null) {
+    if (!vrWelcomeCtx) return;
+    const w = vrWelcomeCanvas.width;
+    const h = vrWelcomeCanvas.height;
+    const st = narrationState || {
+        enabled: narration ? narration.enabled : true,
+        isSpeaking: narration ? narration.isSpeaking : false,
+        currentSentence: narration ? narration.currentSentence : ''
+    };
+
+    vrWelcomeCtx.fillStyle = '#070d1a';
+    vrWelcomeCtx.fillRect(0, 0, w, h);
+
+    vrWelcomeCtx.strokeStyle = '#38bdf8';
+    vrWelcomeCtx.lineWidth = 5;
+    vrWelcomeCtx.strokeRect(8, 8, w - 16, h - 16);
+
+    // Kicker badge
+    vrWelcomeCtx.fillStyle = '#0ea5e9';
+    vrWelcomeCtx.font = 'bold 21px sans-serif';
+    vrWelcomeCtx.textAlign = 'left';
+    vrWelcomeCtx.fillText('● YDSE VR LABORATORY • WELCOME BRIEFING', 42, 46);
+
+    // Voice status pill on top right
+    vrWelcomeCtx.fillStyle = !st.enabled ? '#ef4444' : (st.isSpeaking ? '#22d3ee' : '#10b981');
+    vrWelcomeCtx.font = 'bold 21px sans-serif';
+    vrWelcomeCtx.textAlign = 'right';
+    const statusLabel = !st.enabled ? '🔇 VOICE MUTED' : (st.isSpeaking ? '🔊 NARRATING...' : '✔ READY');
+    vrWelcomeCtx.fillText(statusLabel, w - 42, 46);
+
+    // Main heading
+    vrWelcomeCtx.fillStyle = '#ffffff';
+    vrWelcomeCtx.font = 'bold 36px sans-serif';
+    vrWelcomeCtx.textAlign = 'left';
+    vrWelcomeCtx.fillText('Welcome to the YDSE VR Laboratory!', 42, 92);
+
+    // Live spoken caption
+    vrWelcomeCtx.fillStyle = '#cbd5e1';
+    vrWelcomeCtx.font = '22px sans-serif';
+    const captionText = (st.enabled && st.isSpeaking && st.currentSentence)
+        ? st.currentSentence
+        : 'Here is the full setup of the experiment: Laser Source → Double-Slit Carriage → Optical Rail → Observation Screen.';
+    drawWrappedText(vrWelcomeCtx, captionText, 42, 134, w - 84, 30);
+
+    // Apparatus chips
+    const chips = ['Laser Source', 'Double-Slit Carriage', 'Optical Rail (D)', 'Observation Screen'];
+    chips.forEach((label, idx) => {
+        const cx = 42 + idx * 238;
+        const cy = 202;
+        vrWelcomeCtx.fillStyle = '#0f213a';
+        vrWelcomeCtx.fillRect(cx, cy, 224, 40);
+        vrWelcomeCtx.strokeStyle = '#38bdf8';
+        vrWelcomeCtx.lineWidth = 2;
+        vrWelcomeCtx.strokeRect(cx, cy, 224, 40);
+        vrWelcomeCtx.fillStyle = '#e0f2fe';
+        vrWelcomeCtx.font = 'bold 18px sans-serif';
+        vrWelcomeCtx.textAlign = 'center';
+        vrWelcomeCtx.fillText(label, cx + 112, cy + 26);
+    });
+
+    // Observation Sequence Header + Live Parameter Readout
+    vrWelcomeCtx.textAlign = 'left';
+    vrWelcomeCtx.fillStyle = '#38bdf8';
+    vrWelcomeCtx.font = 'bold 20px sans-serif';
+    vrWelcomeCtx.fillText('📋 OBSERVATION SEQUENCE (CLICK STEP TO EXPLAIN)', 42, 276);
+
+    vrWelcomeCtx.textAlign = 'right';
+    vrWelcomeCtx.fillStyle = '#10b981';
+    vrWelcomeCtx.font = 'bold 19px monospace';
+    vrWelcomeCtx.fillText(getObsReadoutString(), w - 42, 276);
+
+    // 4 Clickable Observation Sequence Tiles
+    const activeIdx = Math.max(0, Math.min(OBSERVATION_SEQUENCE.length - 1, state.activeObsStep));
+    VR_WELCOME_STEP_BOXES.forEach((box) => {
+        const step = OBSERVATION_SEQUENCE[box.idx];
+        const isActive = box.idx === activeIdx;
+        const isDone = !!state.observedSteps[step.id];
+
+        vrWelcomeCtx.fillStyle = isActive ? '#0c3558' : '#0b1426';
+        vrWelcomeCtx.fillRect(box.x, box.y, box.w, box.h);
+        vrWelcomeCtx.strokeStyle = isActive ? '#38bdf8' : (isDone ? '#10b981' : '#334155');
+        vrWelcomeCtx.lineWidth = isActive ? 3 : 2;
+        vrWelcomeCtx.strokeRect(box.x, box.y, box.w, box.h);
+
+        vrWelcomeCtx.textAlign = 'left';
+        vrWelcomeCtx.fillStyle = isActive ? '#ffffff' : '#cbd5e1';
+        vrWelcomeCtx.font = isActive ? 'bold 21px sans-serif' : '600 20px sans-serif';
+        vrWelcomeCtx.fillText(step.shortTitle, box.x + 16, box.y + 38);
+
+        vrWelcomeCtx.textAlign = 'right';
+        vrWelcomeCtx.fillStyle = isDone ? '#10b981' : (isActive ? '#22d3ee' : '#64748b');
+        vrWelcomeCtx.font = 'bold 19px monospace';
+        vrWelcomeCtx.fillText(isDone ? '✓ DONE' : (isActive ? '▶ ACTIVE' : '• NEXT'), box.x + box.w - 16, box.y + 38);
+    });
+
+    // Active Step Explanation Box
+    const activeStep = OBSERVATION_SEQUENCE[activeIdx];
+    vrWelcomeCtx.fillStyle = '#091529';
+    vrWelcomeCtx.fillRect(42, 446, w - 84, 198);
+    vrWelcomeCtx.strokeStyle = '#f59e0b';
+    vrWelcomeCtx.lineWidth = 2.5;
+    vrWelcomeCtx.strokeRect(42, 446, w - 84, 198);
+
+    vrWelcomeCtx.textAlign = 'left';
+    vrWelcomeCtx.fillStyle = '#fde68a';
+    vrWelcomeCtx.font = 'bold 21px sans-serif';
+    drawWrappedText(vrWelcomeCtx, activeStep.tryText, 62, 480, w - 124, 28);
+
+    vrWelcomeCtx.fillStyle = '#f8fafc';
+    vrWelcomeCtx.font = '21px sans-serif';
+    drawWrappedText(vrWelcomeCtx, 'What happens: ' + activeStep.getEffectText(), 62, 536, w - 124, 30);
+
+    vrWelcomeTex.needsUpdate = true;
+
+    if (vrWelcomeMuteBtn && vrWelcomeMuteBtn.userData.drawBtn) {
+        vrWelcomeMuteBtn.userData.drawBtn(
+            st.enabled ? '🔇 Mute' : '🔊 Unmute',
+            st.enabled ? '#f59e0b' : '#10b981'
+        );
+    }
+}
+
+function showVRWelcomePanel() {
+    // Position ~1.45m in front of VR spawn orientation at natural eye height
+    const spawnPos = xrRig.position.clone();
+    const forwardDir = new THREE.Vector3(0, 0, -1).applyEuler(xrRig.rotation).normalize();
+    const panelY = 1.82;
+    vrWelcomeGroup.position.set(
+        spawnPos.x + forwardDir.x * 1.45,
+        panelY,
+        spawnPos.z + forwardDir.z * 1.45
+    );
+    vrWelcomeGroup.lookAt(spawnPos.x, panelY, spawnPos.z);
+    vrWelcomeGroup.visible = true;
+    redrawWelcomeGrabHandle('normal');
+    redrawVRWelcomeTexture();
+}
 
 function onXRSqueezeStart(event) {
     const controller = event.target;
@@ -3420,6 +4037,16 @@ function onXRSqueezeStart(event) {
     const raycaster = new THREE.Raycaster();
     raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
     raycaster.ray.direction.set(0, 0, -1).transformDirection(controller.matrixWorld);
+
+    // 0. Raycast against 3D VR Welcome Panel (Grip grabs panel from anywhere on it)
+    if (vrWelcomeGroup.visible) {
+        const welcomeTargets = [vrWelcomeGrabHandleMesh, vrWelcomeBacking, vrWelcomeScreenMesh].filter(Boolean);
+        const welcomeHits = raycaster.intersectObjects(welcomeTargets, false);
+        if (welcomeHits.length > 0) {
+            startVRWelcomeDrag(controller, welcomeHits[0].distance, true);
+            return;
+        }
+    }
 
     // 1. Raycast against Floating VR Screen (Direct ray aiming ONLY - no accidental proximity grab!)
     const panelTargets = [vrPanelGrabHandleMesh, vrPanelChassisMesh].filter(Boolean);
@@ -3439,6 +4066,9 @@ function onXRSqueezeStart(event) {
 }
 
 function onXRSqueezeEnd(event) {
+    if (state.activeVRWelcomeDrag && state.activeVRWelcomeDrag.controller === event.target) {
+        endVRWelcomeDrag();
+    }
     if (state.activeVRPanelDrag && state.activeVRPanelDrag.controller === event.target) {
         endVRPanelDrag();
     }
@@ -3455,7 +4085,36 @@ function onXRSelectStart(event) {
     raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
     raycaster.ray.direction.set(0, 0, -1).transformDirection(controller.matrixWorld);
 
-    // 0. Check VR Panel Grab Handle or Chassis Trigger Drag
+    // 0. Check VR Welcome Panel Grab Handle or Body (if not pressing a Welcome button)
+    if (vrWelcomeGroup.visible) {
+        const welcomeBtnHits = raycaster.intersectObjects(vrWelcomeButtons, false);
+        if (welcomeBtnHits.length > 0 && welcomeBtnHits[0].object.userData.onClick) {
+            welcomeBtnHits[0].object.userData.onClick();
+            const inputSource = controller.userData.inputSource;
+            if (inputSource?.gamepad?.hapticActuators?.[0]) {
+                inputSource.gamepad.hapticActuators[0].pulse(0.6, 50);
+            }
+            return;
+        }
+        const welcomeHandleHits = raycaster.intersectObjects([vrWelcomeGrabHandleMesh, vrWelcomeBacking, vrWelcomeScreenMesh], false);
+        if (welcomeHandleHits.length > 0) {
+            if (welcomeHandleHits[0].object === vrWelcomeScreenMesh) {
+                const obsIdx = hitTestVRWelcomeObsStep(welcomeHandleHits[0].uv);
+                if (obsIdx !== -1) {
+                    selectObservationStep(obsIdx, { narrate: true });
+                    const inputSource = controller.userData.inputSource;
+                    if (inputSource?.gamepad?.hapticActuators?.[0]) {
+                        inputSource.gamepad.hapticActuators[0].pulse(0.6, 40);
+                    }
+                    return;
+                }
+            }
+            startVRWelcomeDrag(controller, welcomeHandleHits[0].distance, false);
+            return;
+        }
+    }
+
+    // 0b. Check VR Panel Grab Handle or Chassis Trigger Drag
     const handleHits = raycaster.intersectObjects([vrPanelGrabHandleMesh, vrPanelChassisMesh], false);
     // Only drag chassis if not aiming at buttons
     const btnHitsCheck = raycaster.intersectObjects(vrButtons, false);
@@ -3517,8 +4176,9 @@ function onXRSelectStart(event) {
         }
     }
 
-    // 1. Raycast against 3D In-World VR Buttons
-    const btnHits = raycaster.intersectObjects(vrButtons, false);
+    // 1. Raycast against 3D In-World VR Buttons & VR Welcome Panel Buttons
+    const allVRButtons = vrWelcomeGroup.visible ? [...vrWelcomeButtons, ...vrButtons] : vrButtons;
+    const btnHits = raycaster.intersectObjects(allVRButtons, false);
     if (btnHits.length > 0 && btnHits[0].object.userData.onClick) {
         btnHits[0].object.userData.onClick();
         const inputSource = controller.userData.inputSource;
@@ -3545,6 +4205,9 @@ function onXRSelectEnd(event) {
     state.isDraggingScreen = false;
     state.dragController = null;
     state.activeVRConsoleDrag = null;
+    if (state.activeVRWelcomeDrag && !state.activeVRWelcomeDrag.isGrip) {
+        endVRWelcomeDrag();
+    }
     if (state.activeVRPanelDrag && !state.activeVRPanelDrag.isGrip) {
         endVRPanelDrag();
     }
@@ -3580,6 +4243,7 @@ function setWavelength(nm) {
     updateVRPanelHeader();
     redrawConsoleTexture();
     redrawKioskTexture();
+    recordObservationChange('wavelength');
 }
 
 function setScreenDistance(d) {
@@ -3594,6 +4258,7 @@ function setScreenDistance(d) {
     updateVRPanelHeader();
     redrawConsoleTexture();
     redrawKioskTexture();
+    recordObservationChange('screen');
 }
 
 function setSlitSeparation(mm) {
@@ -3607,6 +4272,7 @@ function setSlitSeparation(mm) {
     updateTelemetry();
     redrawConsoleTexture();
     redrawKioskTexture();
+    recordObservationChange('slit');
 }
 
 function setSlitWidth(mm) {
@@ -3619,6 +4285,7 @@ function setSlitWidth(mm) {
     updateTelemetry();
     redrawConsoleTexture();
     redrawKioskTexture();
+    recordObservationChange('slit');
 }
 
 function toggleLaserPower() {
@@ -3647,6 +4314,7 @@ function toggleQuantumMode() {
 
     if (isQuantum) {
         quantum.start();
+        recordObservationChange('quantum');
     } else {
         quantum.pause();
     }
@@ -3686,6 +4354,7 @@ function setSlitState(left, right, activeId) {
     redrawScreenTexture();
     updateBeams();
     updateTelemetry();
+    recordObservationChange('slit');
 }
 
 document.getElementById('slit-both').addEventListener('click', () => setSlitState(true, true, 'slit-both'));
@@ -3740,10 +4409,93 @@ document.getElementById('slider-photon-rate').addEventListener('input', (e) => {
     document.getElementById('val-photon-rate').innerText = `${rate} / sec`;
 });
 
-// Modals
+// Modals & Narration Controls
+document.getElementById('btn-preview-welcome-voice')?.addEventListener('click', () => {
+    if (narration) {
+        narration.setEnabled(true);
+        narration.narrateWelcome({ chime: true });
+    }
+});
+
 document.getElementById('btn-start-experiment').addEventListener('click', () => {
     document.getElementById('modal-welcome').classList.add('hidden');
+    enterSimulationWithWelcome({ isVR: false });
 });
+
+document.getElementById('btn-dismiss-welcome-ui')?.addEventListener('click', () => {
+    document.getElementById('welcome-narration-ui')?.classList.add('hidden');
+});
+
+// Make Desktop HTML Welcome Narration UI freely draggable anywhere on screen
+(() => {
+    const toast = document.getElementById('welcome-narration-ui');
+    const handle = toast ? toast.querySelector('.welcome-toast-header') : null;
+    if (!toast || !handle) return;
+
+    let dragOffset = null;
+
+    handle.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('button')) return;
+        const rect = toast.getBoundingClientRect();
+        toast.style.left = rect.left + 'px';
+        toast.style.top = rect.top + 'px';
+        toast.style.bottom = 'auto';
+        toast.style.transform = 'none';
+        dragOffset = {
+            dx: e.clientX - rect.left,
+            dy: e.clientY - rect.top
+        };
+        toast.classList.add('dragging');
+        handle.setPointerCapture(e.pointerId);
+    });
+
+    handle.addEventListener('pointermove', (e) => {
+        if (!dragOffset) return;
+        const maxLeft = Math.max(0, window.innerWidth - toast.offsetWidth - 8);
+        const maxTop = Math.max(0, window.innerHeight - toast.offsetHeight - 8);
+        const nextLeft = THREE.MathUtils.clamp(e.clientX - dragOffset.dx, 8, maxLeft);
+        const nextTop = THREE.MathUtils.clamp(e.clientY - dragOffset.dy, 8, maxTop);
+        toast.style.left = nextLeft + 'px';
+        toast.style.top = nextTop + 'px';
+    });
+
+    const stopToastDrag = () => {
+        if (!dragOffset) return;
+        dragOffset = null;
+        toast.classList.remove('dragging');
+    };
+    handle.addEventListener('pointerup', stopToastDrag);
+    handle.addEventListener('pointercancel', stopToastDrag);
+})();
+
+document.getElementById('btn-replay-welcome')?.addEventListener('click', () => {
+    if (narration) {
+        narration.setEnabled(true);
+        narration.narrateWelcome({ chime: true });
+    }
+});
+
+document.getElementById('btn-toggle-narration')?.addEventListener('click', () => {
+    if (narration) narration.toggleMute();
+});
+
+document.getElementById('btn-audio')?.addEventListener('click', () => {
+    if (narration) narration.toggleMute();
+});
+
+document.getElementById('btn-start-tour')?.addEventListener('click', () => {
+    document.getElementById('welcome-narration-ui')?.classList.add('hidden');
+    if (narration) narration.setEnabled(true);
+    lesson.goToStage(1);
+});
+
+document.getElementById('btn-narrate-stage')?.addEventListener('click', () => {
+    if (narration) {
+        narration.setEnabled(true);
+        narration.narrateStage(lesson.getStageInfo(), { force: true });
+    }
+});
+
 document.getElementById('btn-help').addEventListener('click', () => {
     document.getElementById('modal-help').classList.toggle('hidden');
 });
@@ -3782,14 +4534,35 @@ window.addEventListener('pointerdown', (e) => {
     state.mousePos.y = -(e.clientY / window.innerHeight) * 2 + 1;
     state.mouseRay.setFromCamera(state.mousePos, camera);
 
-    // 0a. Check VR Panel Buttons (Desktop support)
-    const vrBtnHits = state.mouseRay.intersectObjects(vrButtons, false);
+    // 0a. Check VR Panel Buttons & VR Welcome Buttons (Desktop support)
+    const activeDesktopVRButtons = vrWelcomeGroup.visible ? [...vrWelcomeButtons, ...vrButtons] : vrButtons;
+    const vrBtnHits = state.mouseRay.intersectObjects(activeDesktopVRButtons, false);
     if (vrBtnHits.length > 0 && vrBtnHits[0].object.userData.onClick) {
         vrBtnHits[0].object.userData.onClick();
         return;
     }
 
-    // 0b. Check VR Panel Grab Handle / Chassis (Desktop Mouse Dragging)
+    // 0b. Check VR Panel & VR Welcome Grab Handle / Chassis (Desktop Mouse Dragging)
+    if (vrWelcomeGroup.visible) {
+        const welcomeDragHits = state.mouseRay.intersectObjects([vrWelcomeGrabHandleMesh, vrWelcomeBacking, vrWelcomeScreenMesh], false);
+        if (welcomeDragHits.length > 0) {
+            if (welcomeDragHits[0].object === vrWelcomeScreenMesh) {
+                const obsIdx = hitTestVRWelcomeObsStep(welcomeDragHits[0].uv);
+                if (obsIdx !== -1) {
+                    selectObservationStep(obsIdx, { narrate: true });
+                    return;
+                }
+            }
+            state.activeMouseWelcomeDrag = {
+                holdDistance: welcomeDragHits[0].distance
+            };
+            controls.enabled = false;
+            document.body.style.cursor = 'grabbing';
+            redrawWelcomeGrabHandle('dragging');
+            return;
+        }
+    }
+
     const panelHits = state.mouseRay.intersectObjects([vrPanelGrabHandleMesh, vrPanelChassisMesh], false);
     if (panelHits.length > 0) {
         state.activeMousePanelDrag = {
@@ -3882,7 +4655,27 @@ window.addEventListener('pointermove', (e) => {
         return;
     }
 
-    // 0b. Mouse Dragging Floating VR Screen
+    // 0b. Mouse Dragging Floating VR Welcome Panel or Floating Control Screen
+    if (state.activeMouseWelcomeDrag) {
+        const targetPos = new THREE.Vector3()
+            .copy(camera.position)
+            .addScaledVector(state.mouseRay.direction, state.activeMouseWelcomeDrag.holdDistance);
+
+        targetPos.x = THREE.MathUtils.clamp(targetPos.x, -3.8, 3.8);
+        targetPos.y = THREE.MathUtils.clamp(targetPos.y, 0.4, 2.5);
+        targetPos.z = THREE.MathUtils.clamp(targetPos.z, -3.6, 3.6);
+
+        vrWelcomeGroup.position.copy(targetPos);
+        vrWelcomeGroup.lookAt(camera.position.x, vrWelcomeGroup.position.y, camera.position.z);
+        return;
+    }
+
+    if (state.activeMouseWelcomeDrag) {
+        state.activeMouseWelcomeDrag = null;
+        controls.enabled = true;
+        document.body.style.cursor = 'default';
+        redrawWelcomeGrabHandle('normal');
+    }
     if (state.activeMousePanelDrag) {
         const targetPos = new THREE.Vector3()
             .copy(camera.position)
@@ -3895,6 +4688,22 @@ window.addEventListener('pointermove', (e) => {
         vrPanelGroup.position.copy(targetPos);
         vrPanelGroup.lookAt(camera.position.x, vrPanelGroup.position.y, camera.position.z);
         return;
+    }
+
+    // Check hover on VR Welcome Panel Grab Handle
+    if (vrWelcomeGroup.visible) {
+        const welcomeHoverHits = state.mouseRay.intersectObjects([vrWelcomeGrabHandleMesh, vrWelcomeBacking], false);
+        if (welcomeHoverHits.length > 0) {
+            document.body.style.cursor = 'grab';
+            state.mouseOverWelcomeHandle = true;
+            redrawWelcomeGrabHandle('hover');
+        } else if (state.mouseOverWelcomeHandle) {
+            state.mouseOverWelcomeHandle = false;
+            redrawWelcomeGrabHandle('normal');
+            if (!state.mouseOverConsole && !state.mouseOverKiosk && !state.mouseOverPanelHandle) {
+                document.body.style.cursor = 'default';
+            }
+        }
     }
 
     // Check hover on VR Panel Grab Handle / Chassis
@@ -3967,6 +4776,21 @@ window.addEventListener('pointermove', (e) => {
 
 window.addEventListener('wheel', (e) => {
     if (renderer.xr.isPresenting) return;
+    if (state.activeMouseWelcomeDrag) {
+        e.preventDefault();
+        state.activeMouseWelcomeDrag.holdDistance = THREE.MathUtils.clamp(
+            state.activeMouseWelcomeDrag.holdDistance + (e.deltaY > 0 ? 0.15 : -0.15),
+            0.5,
+            4.5
+        );
+        return;
+    }
+    if (state.activeMouseWelcomeDrag) {
+        state.activeMouseWelcomeDrag = null;
+        controls.enabled = true;
+        document.body.style.cursor = 'default';
+        redrawWelcomeGrabHandle('normal');
+    }
     if (state.activeMousePanelDrag) {
         e.preventDefault();
         state.activeMousePanelDrag.holdDistance = THREE.MathUtils.clamp(
@@ -4001,6 +4825,12 @@ window.addEventListener('pointerup', () => {
         controls.enabled = true;
         document.body.style.cursor = 'default';
     }
+    if (state.activeMouseWelcomeDrag) {
+        state.activeMouseWelcomeDrag = null;
+        controls.enabled = true;
+        document.body.style.cursor = 'default';
+        redrawWelcomeGrabHandle('normal');
+    }
     if (state.activeMousePanelDrag) {
         state.activeMousePanelDrag = null;
         controls.enabled = true;
@@ -4023,6 +4853,8 @@ window.addEventListener('keydown', (e) => {
         document.getElementById('btn-reset').click();
     } else if (e.code === 'KeyH') {
         document.getElementById('btn-help').click();
+    } else if (e.code === 'KeyM') {
+        if (narration) narration.toggleMute();
     } else if (e.code === 'KeyC') {
         document.getElementById('btn-quantum-clear').click();
     } else if (e.key >= '1' && e.key <= '6') {
@@ -4193,4 +5025,5 @@ setWavelength(650.0);
 setSlitSeparation(0.50);
 setScreenDistance(2.00);
 setSlitWidth(0.10);
+syncObservationSequenceUI();
 console.log("🚀 Young's Double-Slit XR Simulation initialized successfully.");
